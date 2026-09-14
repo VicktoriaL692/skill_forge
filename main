@@ -1,0 +1,427 @@
+"""
+SkillForge — Privacy-Preserving, Explainable Career Match Engine
+
+A portfolio project that ranks job descriptions against a candidate profile,
+explains the match, and creates privacy-safe SHA-256 fingerprints for the
+skill data used by each comparison.
+
+Run:
+    python main.py
+"""
+
+from dataclasses import dataclass
+import hashlib
+import json
+import re
+
+
+# ---------------------------------------------------------------------------
+# Data Models
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CandidateProfile:
+    name: str
+    skills: list[str]
+    projects: list[str]
+
+
+@dataclass
+class Job:
+    title: str
+    company: str
+    description: str
+
+
+# ---------------------------------------------------------------------------
+# Skill Dictionary
+# ---------------------------------------------------------------------------
+
+SKILL_ALIASES = {
+    "python": {"python"},
+    "sql": {"sql", "postgresql", "mysql"},
+    "javascript": {"javascript", "js"},
+    "typescript": {"typescript", "ts"},
+    "react": {"react", "reactjs"},
+    "fastapi": {"fastapi"},
+    "flask": {"flask"},
+    "docker": {"docker", "containerization"},
+    "aws": {"aws", "amazon web services"},
+    "git": {"git", "github", "gitlab"},
+    "machine learning": {"machine learning", "ml"},
+    "pandas": {"pandas"},
+    "scikit-learn": {"scikit-learn", "sklearn"},
+    "data analysis": {
+        "data analysis",
+        "analytics",
+        "data analytics",
+    },
+    "rest api": {
+        "rest api",
+        "restful api",
+        "rest",
+    },
+    "testing": {
+        "pytest",
+        "unit testing",
+        "testing",
+        "test automation",
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Text Processing
+# ---------------------------------------------------------------------------
+
+def normalize(text: str) -> str:
+    """
+    Normalize text so skill extraction is more reliable.
+    """
+    return re.sub(
+        r"[^a-z0-9+#.\s-]",
+        " ",
+        text.lower()
+    )
+
+
+def extract_skills(text: str) -> set[str]:
+    """
+    Convert free-form text into canonical skill names.
+    """
+
+    normalized = normalize(text)
+    found = set()
+
+    for canonical, aliases in SKILL_ALIASES.items():
+
+        for alias in aliases:
+
+            pattern = rf"\b{re.escape(alias)}\b"
+
+            if re.search(pattern, normalized):
+                found.add(canonical)
+                break
+
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Security / Hashing
+# ---------------------------------------------------------------------------
+
+def sha256_fingerprint(values: set[str] | list[str]) -> str:
+    """
+    Generate a deterministic SHA-256 fingerprint.
+
+    The input values are:
+    1. converted to a set
+    2. sorted
+    3. joined
+    4. hashed
+
+    This means the same logical skill set produces the same fingerprint
+    regardless of ordering.
+
+    IMPORTANT:
+    SHA-256 is hashing, NOT encryption.
+    """
+
+    canonical = "|".join(
+        sorted(set(values))
+    ).encode("utf-8")
+
+    return hashlib.sha256(canonical).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Matching Algorithm
+# ---------------------------------------------------------------------------
+
+def score_job(
+    profile: CandidateProfile,
+    job: Job
+) -> dict:
+    """
+    Compare a candidate against one job.
+
+    Score formula:
+
+        skill coverage * 85
+        +
+        project bonus
+
+    The score is capped at 100.
+    """
+
+    # Extract skills required by job
+    required_skills = extract_skills(
+        job.description
+    )
+
+    # Extract candidate skills from explicit skills + projects
+    candidate_skills = extract_skills(
+        " ".join(
+            profile.skills +
+            profile.projects
+        )
+    )
+
+    # Skills appearing in both sets
+    matched = required_skills & candidate_skills
+
+    # Required skills candidate does not currently demonstrate
+    missing = required_skills - candidate_skills
+
+    # Prevent division by zero
+    if required_skills:
+        coverage = (
+            len(matched)
+            /
+            len(required_skills)
+        )
+    else:
+        coverage = 0
+
+    # Reward hands-on project experience
+    project_bonus = min(
+        0.15,
+        0.03 * len(profile.projects)
+    )
+
+    # Transparent scoring formula
+    score = min(
+        100,
+        round(
+            (coverage * 85)
+            +
+            (project_bonus * 100)
+        )
+    )
+
+    return {
+        "title": job.title,
+        "company": job.company,
+        "score": score,
+        "matched": sorted(matched),
+        "missing": sorted(missing),
+        "required_skill_count": len(required_skills),
+
+        # Security/data-integrity feature
+        "candidate_fingerprint":
+            sha256_fingerprint(candidate_skills),
+
+        "job_fingerprint":
+            sha256_fingerprint(required_skills),
+    }
+
+
+def rank_jobs(
+    profile: CandidateProfile,
+    jobs: list[Job]
+) -> list[dict]:
+    """
+    Rank all jobs from highest to lowest match score.
+    """
+
+    results = [
+        score_job(profile, job)
+        for job in jobs
+    ]
+
+    return sorted(
+        results,
+        key=lambda result: result["score"],
+        reverse=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# Terminal Report
+# ---------------------------------------------------------------------------
+
+def print_report(
+    profile: CandidateProfile,
+    results: list[dict]
+) -> None:
+
+    print()
+    print("=" * 70)
+    print("SKILLFORGE — EXPLAINABLE CAREER MATCH REPORT")
+    print("=" * 70)
+
+    print(
+        f"Candidate: {profile.name}"
+    )
+
+    print()
+
+    for index, result in enumerate(
+        results,
+        start=1
+    ):
+
+        print(
+            f"{index}. "
+            f"{result['title']} "
+            f"— {result['company']}"
+        )
+
+        print(
+            f"   Match score: "
+            f"{result['score']}/100"
+        )
+
+        print(
+            "   Matched skills: "
+            +
+            (
+                ", ".join(
+                    result["matched"]
+                )
+                if result["matched"]
+                else "None"
+            )
+        )
+
+        print(
+            "   Skill gaps: "
+            +
+            (
+                ", ".join(
+                    result["missing"]
+                )
+                if result["missing"]
+                else "None"
+            )
+        )
+
+        print(
+            "   Candidate SHA-256: "
+            f"{result['candidate_fingerprint'][:16]}..."
+        )
+
+        print(
+            "   Job SHA-256:       "
+            f"{result['job_fingerprint'][:16]}..."
+        )
+
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Demo Data
+# ---------------------------------------------------------------------------
+
+def demo_data() -> tuple[
+    CandidateProfile,
+    list[Job]
+]:
+
+    candidate = CandidateProfile(
+
+        name="Alex Morgan",
+
+        skills=[
+            "Python",
+            "SQL",
+            "FastAPI",
+            "Docker",
+            "Git",
+            "Pandas",
+        ],
+
+        projects=[
+
+            "Built a REST API with "
+            "FastAPI and PostgreSQL",
+
+            "Created a data analysis "
+            "dashboard with Pandas",
+
+            "Added automated testing "
+            "with pytest",
+        ],
+    )
+
+    jobs = [
+
+        Job(
+            title="Backend Software Engineer",
+
+            company="Northstar Labs",
+
+            description="""
+            Build Python REST APIs with
+            FastAPI, SQL, Docker, Git
+            and testing.
+            """,
+        ),
+
+        Job(
+            title="Data Analyst",
+
+            company="Civic Data Co.",
+
+            description="""
+            Analyze datasets with Python,
+            SQL, Pandas and data analysis
+            tools.
+            """,
+        ),
+
+        Job(
+            title="Frontend Engineer",
+
+            company="PixelWorks",
+
+            description="""
+            Build React and TypeScript
+            applications using JavaScript,
+            Git and AWS.
+            """,
+        ),
+    ]
+
+    return candidate, jobs
+
+
+# ---------------------------------------------------------------------------
+# Main Program
+# ---------------------------------------------------------------------------
+
+def main():
+
+    candidate, jobs = demo_data()
+
+    results = rank_jobs(
+        candidate,
+        jobs
+    )
+
+    print_report(
+        candidate,
+        results
+    )
+
+    # Save machine-readable output
+    with open(
+        "match_results.json",
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            results,
+            file,
+            indent=2
+        )
+
+    print(
+        "Saved results to "
+        "match_results.json"
+    )
+
+
+if __name__ == "__main__":
+    main()
